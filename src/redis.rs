@@ -1,9 +1,10 @@
 use bb8::{CustomizeConnection, ManageConnection, Pool};
+use redis::AsyncConnectionConfig;
 use redis::AsyncCommands;
 pub use redis::RedisError;
-use redis::ToRedisArgs;
+use redis::{ToRedisArgs, ToSingleRedisArg};
 pub use redis::Value as RedisValue;
-use redis::{aio::MultiplexedConnection as Connection, ErrorKind};
+use redis::{aio::MultiplexedConnection as Connection, ErrorKind, ServerErrorKind};
 use redis::{Client, IntoConnectionInfo};
 use std::future::Future;
 use std::ops::DerefMut;
@@ -57,8 +58,11 @@ impl ManageConnection for RedisConnectionManager {
     type Error = RedisError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        let config = AsyncConnectionConfig::new().set_response_timeout(None);
         Ok(RedisConnection::new(
-            self.client.get_multiplexed_async_connection().await?,
+            self.client
+                .get_multiplexed_async_connection_with_config(&config)
+                .await?,
         ))
     }
 
@@ -68,7 +72,7 @@ impl ManageConnection for RedisConnectionManager {
             .await?;
         match pong.as_str() {
             "PONG" => Ok(()),
-            _ => Err((ErrorKind::ResponseError, "ping request").into()),
+            _ => Err((ErrorKind::Server(ServerErrorKind::ResponseError), "ping request").into()),
         }
     }
 
@@ -200,7 +204,10 @@ impl RedisConnection {
             .await
     }
 
-    pub async fn zrangebyscore_limit<L: ToRedisArgs + Send + Sync, U: ToRedisArgs + Sync + Send>(
+    pub async fn zrangebyscore_limit<
+        L: ToRedisArgs + ToSingleRedisArg + Send + Sync,
+        U: ToRedisArgs + ToSingleRedisArg + Sync + Send,
+    >(
         &mut self,
         key: String,
         lower: L,
@@ -213,7 +220,10 @@ impl RedisConnection {
             .await
     }
 
-    pub async fn zadd<V: ToRedisArgs + Send + Sync, S: ToRedisArgs + Send + Sync>(
+    pub async fn zadd<
+        V: ToRedisArgs + ToSingleRedisArg + Send + Sync,
+        S: ToRedisArgs + ToSingleRedisArg + Send + Sync,
+    >(
         &mut self,
         key: String,
         value: V,

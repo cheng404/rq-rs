@@ -9,6 +9,49 @@ This is a reimplementation of sidekiq in rust. It is compatible with sidekiq.rb 
 Sidekiq.rb is obviously much more mature than this repo, but I hope you enjoy using it. This library is built using tokio
 so it is async by default.
 
+Current dependency notes:
+
+- The library uses `redis` `1.1` and configures async multiplexed connections without a response timeout so blocking queue fetches such as `BRPOP` continue to work as expected.
+- `Cargo.toml` uses semver-compatible version requirements rather than pinning patch versions, which is the recommended style for reusable Rust libraries.
+
+## Installation
+
+Add the library to your project:
+
+```toml
+[dependencies]
+rusty-sidekiq = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+If you want the optional process RSS metrics published for sidekiq-web style process stats,
+leave the default `rss-stats` feature enabled. If you prefer to avoid that extra dependency,
+disable default features:
+
+```toml
+[dependencies]
+rusty-sidekiq = { version = "0.13", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+## Runtime Requirements
+
+- A Redis server reachable by your application.
+- A Tokio runtime.
+- For the integration tests in this repository, Redis is expected at `redis://127.0.0.1:6379/`.
+
+You can start a local Redis for development with Docker:
+
+```bash
+docker run --rm -p 6379:6379 redis:7
+```
+
+And then run the full test suite:
+
+```bash
+cargo test
+```
+
 
 ## The Worker
 
@@ -44,7 +87,7 @@ struct PaymentReportArgs {
 #[async_trait]
 impl Worker<PaymentReportArgs> for PaymentReportWorker {
     // Default worker options
-    fn opts() -> sidekiq::WorkerOpts<Self> {
+    fn opts() -> sidekiq::WorkerOpts<PaymentReportArgs, Self> {
         sidekiq::WorkerOpts::new().queue("yolo")
     }
 
@@ -63,7 +106,7 @@ typed arguments.
 
 ```rust
 PaymentReportWorker::perform_async(
-    &mut redis,
+    &redis,
     PaymentReportArgs {
         user_guid: "USR-123".into(),
     },
@@ -77,7 +120,7 @@ You can make custom overrides at enqueue time.
 PaymentReportWorker::opts()
     .queue("brolo")
     .perform_async(
-        &mut redis,
+        &redis,
         PaymentReportArgs {
             user_guid: "USR-123".into(),
         },
@@ -89,7 +132,7 @@ Or you can have more control by using the crate level method.
 
 ```rust
 sidekiq::perform_async(
-    &mut redis,
+    &redis,
     "PaymentReportWorker".into(),
     "yolo".into(),
     PaymentReportArgs {
@@ -100,6 +143,17 @@ sidekiq::perform_async(
 ```
 
 See more examples in `examples/demo.rs`.
+
+## API Overview
+
+The most commonly used entry points are:
+
+- `Worker<Args>` for defining strongly typed workers.
+- `Worker::perform_async` and `Worker::perform_in` for enqueueing typed jobs.
+- `sidekiq::perform_async` and `sidekiq::perform_in` for enqueueing by explicit class name.
+- `Processor::new(...).with_config(...)` for building a worker process.
+- `periodic::builder(...)` for cron-style recurring jobs.
+- `with_custom_namespace(...)` for compatibility with namespaced Redis deployments.
 
 #### Unique jobs
 
@@ -118,7 +172,7 @@ custom middlewares, and start the server.
 ```rust
 // Redis
 let manager = sidekiq::RedisConnectionManager::new("redis://127.0.0.1/").unwrap();
-let mut redis = bb8::Pool::builder().build(manager).await.unwrap();
+let redis = bb8::Pool::builder().build(manager).await.unwrap();
 
 // Sidekiq server
 let mut p = Processor::new(
@@ -152,7 +206,7 @@ periodic::destroy_all(redis).await?;
 
 // Add a new periodic job
 periodic::builder("0 0 8 * * *")?
-    .name("Email clients with an oustanding balance daily at 8am UTC")
+    .name("Email clients with an outstanding balance daily at 8am UTC")
     .queue("reminders")
     .args(EmailReminderArgs {
         report_type: "outstanding_balance",
@@ -182,12 +236,12 @@ score in redis, the original json string will be used again to keep things consi
 ## Server Middleware
 
 One great feature of sidekiq is its middleware pattern. This library reimplements the
-sidekiq server middleware pattern in rust. In the example below supposes you have an
-app that performs work only for paying customers. The middleware below will hault jobs
+sidekiq server middleware pattern in rust. In the example below suppose you have an
+app that performs work only for paying customers. The middleware below will halt jobs
 from being executed if the customers have expired. One thing kind of interesting about
 the implementation is that we can rely on serde to conditionally type-check workers.
 For example, suppose I only care about user-centric workers, and I identify those by their
-`user_guid` as a parameter. With serde it's easy to validate your paramters.
+`user_guid` as a parameter. With serde it's easy to validate your parameters.
 
 ```rust
 use tracing::info;
@@ -201,11 +255,11 @@ impl FilterExpiredUsersMiddleware {
 }
 
 #[derive(Deserialize)]
-struct FiltereExpiredUsersArgs {
+struct FilterExpiredUsersArgs {
     user_guid: String,
 }
 
-impl FiltereExpiredUsersArgs {
+impl FilterExpiredUsersArgs {
     fn is_expired(&self) -> bool {
         self.user_guid == "USR-123-EXPIRED"
     }
@@ -219,9 +273,9 @@ impl ServerMiddleware for FilterExpiredUsersMiddleware {
         job: &Job,
         worker: Arc<WorkerRef>,
         redis: RedisPool,
-    ) -> ServerResult {
+    ) -> Result<()> {
         // Use serde to check if a user_guid is part of the job args.
-        let args: Result<(FiltereExpiredUsersArgs,), serde_json::Error> =
+        let args: std::result::Result<(FilterExpiredUsersArgs,), serde_json::Error> =
             serde_json::from_value(job.args.clone());
 
         // If we can safely deserialize then attempt to filter based on user guid.
@@ -294,7 +348,8 @@ let redis = bb8::Pool::builder()
     .await?;
 ```
 
-Now all commands used by this library will be prefixed with `my_cool_app:`, example: `ZDEL my_cool_app:scheduled {...}`.
+Now all Redis keys used by this library will be prefixed with `my_cool_app:`. For example, the
+internal `schedule` sorted set becomes `my_cool_app:schedule`.
 
 ### Passing database connections into the workers
 

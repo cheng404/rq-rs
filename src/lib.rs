@@ -652,6 +652,7 @@ mod test {
             pub mod workers {
                 use super::super::super::super::*;
 
+                #[allow(dead_code)]
                 pub struct TestOpts;
 
                 #[async_trait]

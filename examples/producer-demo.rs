@@ -7,6 +7,7 @@ use sidekiq::{
 use std::sync::Arc;
 use tracing::{error, info};
 
+#[allow(dead_code)]
 #[derive(Clone)]
 struct HelloWorker;
 
@@ -46,14 +47,17 @@ impl Worker<PaymentReportArgs> for PaymentReportWorker {
     }
 }
 
+#[allow(dead_code)]
 struct FilterExpiredUsersMiddleware {}
 
 #[derive(Deserialize)]
-struct FiltereExpiredUsersArgs {
+#[allow(dead_code)]
+struct FilterExpiredUsersArgs {
     user_guid: String,
 }
 
-impl FiltereExpiredUsersArgs {
+#[allow(dead_code)]
+impl FilterExpiredUsersArgs {
     fn is_expired(&self) -> bool {
         self.user_guid == "USR-123-EXPIRED"
     }
@@ -68,7 +72,7 @@ impl ServerMiddleware for FilterExpiredUsersMiddleware {
         worker: Arc<WorkerRef>,
         redis: Pool<RedisConnectionManager>,
     ) -> Result<()> {
-        let args: std::result::Result<(FiltereExpiredUsersArgs,), serde_json::Error> =
+        let args: std::result::Result<(FilterExpiredUsersArgs,), serde_json::Error> =
             serde_json::from_value(job.args.clone());
 
         // If we can safely deserialize then attempt to filter based on user guid.

@@ -300,7 +300,7 @@ mod test {
         let (mut retry_p, _retry_redis) = new_base_processor(retry_queue.clone()).await;
         p.register(worker.clone());
 
-        let mut job = AlwaysFailWorker::opts()
+        let _ = AlwaysFailWorker::opts()
             .queue(queue)
             .retry(5)
             .retry_queue(&retry_queue)
