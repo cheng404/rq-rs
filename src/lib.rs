@@ -1029,7 +1029,7 @@ mod test {
 
         assert!(
             cfg.num_workers > 0,
-            "num_workers should be greater than 0 (using num cpu)"
+            "num_workers should be greater than 0"
         );
 
         let cfg = cfg.num_workers(1000);

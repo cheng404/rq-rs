@@ -172,7 +172,9 @@ impl ProcessorConfig {
 impl Default for ProcessorConfig {
     fn default() -> Self {
         Self {
-            num_workers: num_cpus::get(),
+            num_workers: std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1),
             balance_strategy: Default::default(),
             queue_configs: Default::default(),
             process_stats: Default::default(),
