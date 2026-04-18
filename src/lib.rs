@@ -19,6 +19,7 @@ mod processor;
 mod redis;
 mod scheduled;
 mod stats;
+mod telemetry;
 
 // Re-export
 pub use crate::redis::{
@@ -29,6 +30,8 @@ pub use middleware::{ChainIter, ServerMiddleware};
 pub use processor::{BalanceStrategy, Processor, ProcessorConfig, QueueConfig, WorkFetcher};
 pub use scheduled::Scheduled;
 pub use stats::{Counter, StatsPublisher};
+pub use telemetry::{set_tracing_config, tracing_config, TracingConfig, TracingVerbosity};
+use tracing::{debug, info, info_span, Instrument};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -570,46 +573,97 @@ impl UnitOfWork {
 
     async fn enqueue_direct(&self, redis: &mut RedisConnection) -> Result<()> {
         let mut job = self.job.clone();
-        job.enqueued_at = Some(chrono::Utc::now().timestamp() as f64);
+        let span = info_span!(
+            "sidekiq.enqueue",
+            jid = %job.jid,
+            class = %job.class,
+            queue = %job.queue,
+            retry_count = job.retry_count.unwrap_or(0),
+            worker_type = "async",
+        );
 
-        if let Some(ref duration) = job.unique_for {
-            // Check to see if this is unique for the given duration.
-            // Even though SET k v NX EQ ttl isn't the best locking
-            // mechanism, I think it's "good enough" to prove this out.
-            let args_as_json_string: String = serde_json::to_string(&job.args)?;
-            let args_hash = format!("{:x}", Sha256::digest(&args_as_json_string));
-            let redis_key = format!(
-                "sidekiq:unique:{}:{}:{}",
-                &job.queue, &job.class, &args_hash
-            );
-            if let redis::RedisValue::Nil = redis
-                .set_nx_ex(redis_key, "", duration.as_secs() as usize)
-                .await?
-            {
-                // This job has already been enqueued. Do not submit it to redis.
-                return Ok(());
+        async {
+            job.enqueued_at = Some(chrono::Utc::now().timestamp() as f64);
+
+            if let Some(ref duration) = job.unique_for {
+                // Check to see if this is unique for the given duration.
+                // Even though SET k v NX EQ ttl isn't the best locking
+                // mechanism, I think it's "good enough" to prove this out.
+                let args_as_json_string: String = serde_json::to_string(&job.args)?;
+                let args_hash = format!("{:x}", Sha256::digest(&args_as_json_string));
+                let redis_key = format!(
+                    "sidekiq:unique:{}:{}:{}",
+                    &job.queue, &job.class, &args_hash
+                );
+                if let redis::RedisValue::Nil = redis
+                    .set_nx_ex(redis_key, "", duration.as_secs() as usize)
+                    .await?
+                {
+                    if telemetry::emit_verbose_traces() {
+                        debug!(
+                            status = "duplicate",
+                            jid = %job.jid,
+                            class = %job.class,
+                            queue = %job.queue,
+                            retry_count = job.retry_count.unwrap_or(0),
+                            worker_type = "async",
+                            "job.deduplicated"
+                        );
+                    }
+                    return Ok(());
+                }
             }
+
+            redis.sadd("queues".to_string(), job.queue.clone()).await?;
+
+            redis
+                .lpush(self.queue.clone(), serde_json::to_string(&job)?)
+                .await?;
+
+            if telemetry::emit_lifecycle_traces() {
+                info!(
+                    status = "queued",
+                    jid = %job.jid,
+                    class = %job.class,
+                    queue = %job.queue,
+                    retry_count = job.retry_count.unwrap_or(0),
+                    worker_type = "async",
+                    "job.enqueued"
+                );
+            }
+
+            Ok(())
         }
-
-        redis.sadd("queues".to_string(), job.queue.clone()).await?;
-
-        redis
-            .lpush(self.queue.clone(), serde_json::to_string(&job)?)
-            .await?;
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     pub async fn reenqueue(&mut self, redis: &RedisPool) -> Result<()> {
         if let Some(retry_count) = self.job.retry_count {
+            let retry_at = Self::retry_job_at(retry_count);
+
             redis
                 .get()
                 .await?
                 .zadd(
                     "retry".to_string(),
                     serde_json::to_string(&self.job)?,
-                    Self::retry_job_at(retry_count).timestamp(),
+                    retry_at.timestamp(),
                 )
                 .await?;
+
+            if telemetry::emit_lifecycle_traces() {
+                info!(
+                    status = "retry_scheduled",
+                    jid = %self.job.jid,
+                    class = %self.job.class,
+                    queue = %self.job.queue,
+                    retry_count,
+                    worker_type = "retry",
+                    enqueue_at = retry_at.timestamp(),
+                    "job.retry_scheduled"
+                );
+            }
         }
 
         Ok(())
@@ -627,19 +681,45 @@ impl UnitOfWork {
         redis: &RedisPool,
         duration: std::time::Duration,
     ) -> Result<()> {
-        let enqueue_at = chrono::Utc::now() + chrono::Duration::from_std(duration)?;
+        let span = info_span!(
+            "sidekiq.schedule",
+            jid = %self.job.jid,
+            class = %self.job.class,
+            queue = %self.job.queue,
+            retry_count = self.job.retry_count.unwrap_or(0),
+            worker_type = "scheduled",
+        );
 
-        redis
-            .get()
-            .await?
-            .zadd(
-                "schedule".to_string(),
-                serde_json::to_string(&self.job)?,
-                enqueue_at.timestamp(),
-            )
-            .await?;
+        async {
+            let enqueue_at = chrono::Utc::now() + chrono::Duration::from_std(duration)?;
 
-        Ok(())
+            redis
+                .get()
+                .await?
+                .zadd(
+                    "schedule".to_string(),
+                    serde_json::to_string(&self.job)?,
+                    enqueue_at.timestamp(),
+                )
+                .await?;
+
+            if telemetry::emit_lifecycle_traces() {
+                info!(
+                    status = "scheduled",
+                    jid = %self.job.jid,
+                    class = %self.job.class,
+                    queue = %self.job.queue,
+                    retry_count = self.job.retry_count.unwrap_or(0),
+                    worker_type = "scheduled",
+                    enqueue_at = enqueue_at.timestamp(),
+                    "job.scheduled"
+                );
+            }
+
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 }
 

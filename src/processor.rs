@@ -1,14 +1,14 @@
 use super::Result;
 use crate::{
-    periodic::PeriodicJob, Chain, Counter, Job, RedisPool, Scheduled, ServerMiddleware,
-    StatsPublisher, UnitOfWork, Worker, WorkerRef,
+    periodic::PeriodicJob, telemetry, Chain, Counter, Job, RedisPool, Scheduled,
+    ServerMiddleware, StatsPublisher, UnitOfWork, Worker, WorkerRef,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use tokio::select;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, info_span, Instrument};
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum WorkFetcher {
@@ -203,41 +203,77 @@ impl Processor {
             return Ok(WorkFetcher::NoWorkFound);
         }
         let mut work = work.expect("polled and found some work");
+        let retry_count = work.job.retry_count.unwrap_or(0);
+        let span = info_span!(
+            "sidekiq.job",
+            jid = %work.job.jid,
+            class = %work.job.class,
+            queue = %work.job.queue,
+            retry_count,
+            worker_type = "worker",
+        );
 
-        let started = std::time::Instant::now();
+        async {
+            let started = std::time::Instant::now();
 
-        info!({
-            "status" = "start",
-            "class" = &work.job.class,
-            "queue" = &work.job.queue,
-            "jid" = &work.job.jid
-        }, "sidekiq");
+            if telemetry::emit_verbose_traces() {
+                debug!(
+                    status = "fetched",
+                    jid = %work.job.jid,
+                    class = %work.job.class,
+                    queue = %work.job.queue,
+                    retry_count,
+                    worker_type = "worker",
+                    "job.fetched"
+                );
+            }
 
-        if let Some(worker) = self.workers.get_mut(&work.job.class) {
-            self.chain
-                .call(&work.job, worker.clone(), self.redis.clone())
-                .await?;
-        } else {
-            error!({
-                "staus" = "fail",
-                "class" = &work.job.class,
-                "queue" = &work.job.queue,
-                "jid" = &work.job.jid
-            },"!!! Worker not found !!!");
-            work.reenqueue(&self.redis).await?;
+            if telemetry::emit_lifecycle_traces() {
+                info!(
+                    status = "start",
+                    jid = %work.job.jid,
+                    class = %work.job.class,
+                    queue = %work.job.queue,
+                    retry_count,
+                    worker_type = "worker",
+                    "job.started"
+                );
+            }
+
+            if let Some(worker) = self.workers.get_mut(&work.job.class) {
+                self.chain
+                    .call(&work.job, worker.clone(), self.redis.clone())
+                    .await?;
+            } else {
+                error!(
+                    status = "fail",
+                    jid = %work.job.jid,
+                    class = %work.job.class,
+                    queue = %work.job.queue,
+                    retry_count,
+                    worker_type = "worker",
+                    "worker.not_found"
+                );
+                work.reenqueue(&self.redis).await?;
+            }
+
+            if telemetry::emit_lifecycle_traces() {
+                info!(
+                    status = "done",
+                    jid = %work.job.jid,
+                    class = %work.job.class,
+                    queue = %work.job.queue,
+                    retry_count,
+                    worker_type = "worker",
+                    elapsed = started.elapsed().as_millis() as u64,
+                    "job.completed"
+                );
+            }
+
+            Ok(WorkFetcher::Done)
         }
-
-        // TODO: Make this only say "done" when the job is successful.
-        // We might need to change the ChainIter to return the final job and
-        // detect any retries?
-        info!({
-            "elapsed" = format!("{:?}", started.elapsed()),
-            "status" = "done",
-            "class" = &work.job.class,
-            "queue" = &work.job.queue,
-            "jid" = &work.job.jid}, "sidekiq");
-
-        Ok(WorkFetcher::Done)
+        .instrument(span)
+        .await
     }
 
     pub fn register<
@@ -261,13 +297,17 @@ impl Processor {
         let mut conn = self.redis.get().await?;
         periodic_job.insert(&mut conn).await?;
 
-        info!({
-            "args" = &periodic_job.args,
-            "class" = &periodic_job.class,
-            "queue" = &periodic_job.queue,
-            "name" = &periodic_job.name,
-            "cron" = &periodic_job.cron,
-        },"Inserting periodic job");
+        if telemetry::emit_verbose_traces() {
+            info!({
+                "args" = &periodic_job.args,
+                "class" = &periodic_job.class,
+                "queue" = &periodic_job.queue,
+                "name" = &periodic_job.name,
+                "cron" = &periodic_job.cron,
+                "worker_type" = "periodic",
+                "status" = "inserted",
+            },"periodic.inserted");
+        }
 
         Ok(())
     }
@@ -277,6 +317,17 @@ impl Processor {
     pub async fn run(self) {
         let mut join_set: JoinSet<()> = JoinSet::new();
 
+        if telemetry::emit_lifecycle_traces() {
+            info!(
+                status = "start",
+                worker_type = "processor",
+                queues = ?self.human_readable_queues,
+                shared_workers = self.config.num_workers,
+                dedicated_queues = self.config.queue_configs.len(),
+                "processor.started"
+            );
+        }
+
         // Logic for spawning shared workers (workers that handles multiple queues) and dedicated
         // workers (workers that handle a single queue).
         let spawn_worker = |mut processor: Processor,
@@ -284,6 +335,18 @@ impl Processor {
                             num: usize,
                             dedicated_queue_name: Option<String>| {
             async move {
+                if telemetry::emit_verbose_traces() {
+                    let queue_name = dedicated_queue_name.as_deref().unwrap_or("shared");
+                    info!(
+                        status = "start",
+                        worker_type = "processor_worker",
+                        worker_id = num,
+                        queue = queue_name,
+                        dedicated = dedicated_queue_name.is_some(),
+                        "processor.worker_started"
+                    );
+                }
+
                 loop {
                     if let Err(err) = processor.process_one().await {
                         error!("Error leaked out the bottom: {:?}", err);
@@ -343,6 +406,10 @@ impl Processor {
                 let stats_publisher =
                     StatsPublisher::new(hostname, queues, busy_jobs, self.config.num_workers);
 
+                if telemetry::emit_verbose_traces() {
+                    info!(status = "start", worker_type = "stats_publisher", "processor.stats_started");
+                }
+
                 loop {
                     // TODO: Use process count to meet a 5 second avg.
                     select! {
@@ -369,6 +436,10 @@ impl Processor {
                 let sched = Scheduled::new(redis);
                 let sorted_sets = vec!["retry".to_string(), "schedule".to_string()];
 
+                if telemetry::emit_verbose_traces() {
+                    info!(status = "start", worker_type = "scheduled_poller", "processor.scheduled_poller_started");
+                }
+
                 loop {
                     // TODO: Use process count to meet a 5 second avg.
                     select! {
@@ -394,6 +465,10 @@ impl Processor {
             async move {
                 let sched = Scheduled::new(redis);
 
+                if telemetry::emit_verbose_traces() {
+                    info!(status = "start", worker_type = "periodic_poller", "processor.periodic_poller_started");
+                }
+
                 loop {
                     // TODO: Use process count to meet a 30 second avg.
                     select! {
@@ -416,6 +491,10 @@ impl Processor {
             if let Err(err) = result {
                 error!("Processor had a spawned task return an error: {}", err);
             }
+        }
+
+        if telemetry::emit_lifecycle_traces() {
+            info!(status = "stop", worker_type = "processor", "processor.stopped");
         }
     }
 

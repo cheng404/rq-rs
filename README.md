@@ -24,15 +24,32 @@ rusty-sidekiq = "0.13"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-If you want the optional process RSS metrics published for sidekiq-web style process stats,
-leave the default `rss-stats` feature enabled. If you prefer to avoid that extra dependency,
-disable default features:
+## Tracing
 
-```toml
-[dependencies]
-rusty-sidekiq = { version = "0.13", default-features = false }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+The crate emits structured `tracing` events for enqueueing, scheduling, retries, periodic jobs,
+and worker execution. Applications remain responsible for installing their own subscriber:
+
+```rust
+use sidekiq::{set_tracing_config, TracingConfig, TracingVerbosity};
+use tracing_subscriber::{fmt, EnvFilter};
+
+set_tracing_config(TracingConfig::default().verbosity(TracingVerbosity::Verbose));
+
+fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .json()
+    .init();
 ```
+
+`TracingVerbosity::Lifecycle` is the default and emits the core lifecycle events. Use
+`TracingVerbosity::Verbose` to include fetch/deduplication details, or `TracingVerbosity::Off`
+to suppress the library's non-error tracing output.
+
+## Process Stats
+
+The sidekiq-web-style process stats publisher still reports `busy`, `beat`, `info`, and related
+fields, but this crate no longer depends on platform-specific RSS collection. The published `rss`
+field now falls back to `"0"` on all platforms.
 
 ## Runtime Requirements
 
