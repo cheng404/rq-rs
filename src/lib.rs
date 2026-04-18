@@ -1,3 +1,21 @@
+#![warn(missing_docs)]
+#![deny(rustdoc::broken_intra_doc_links)]
+
+//! Async Sidekiq-compatible client and worker runtime for Rust.
+//!
+//! The crate provides two main entry points:
+//! - [`Worker`] and [`WorkerOpts`] for strongly typed Rust workers.
+//! - [`Processor`] for polling Redis and executing registered workers.
+//!
+//! Common enqueueing helpers:
+//! - [`Worker::perform_async`] for immediate execution.
+//! - [`Worker::perform_in`] for delayed execution.
+//! - [`perform_async`] and [`perform_in`] for enqueueing by explicit class name.
+//!
+//! Additional APIs are available for periodic jobs ([`periodic`]), Redis namespacing
+//! ([`with_custom_namespace`]), middleware ([`ServerMiddleware`]), and tracing
+//! configuration ([`TracingConfig`]).
+
 use async_trait::async_trait;
 use middleware::Chain;
 use rand::{Rng, RngCore};
@@ -12,6 +30,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
+/// APIs for registering cron-style periodic jobs.
 pub mod periodic;
 
 mod middleware;
@@ -34,32 +53,42 @@ pub use telemetry::{set_tracing_config, tracing_config, TracingConfig, TracingVe
 use tracing::{debug, info, info_span, Instrument};
 
 #[derive(thiserror::Error, Debug)]
+/// Error type returned by this crate.
 pub enum Error {
+    /// A human-readable error message.
     #[error("{0}")]
     Message(String),
 
+    /// JSON serialization or deserialization failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
+    /// Cron parsing or schedule calculation failed.
     #[error(transparent)]
     CronClock(#[from] cron_clock::error::Error),
 
+    /// Redis pool acquisition failed.
     #[error(transparent)]
     BB8(#[from] bb8::RunError<redis::RedisError>),
 
+    /// A chrono conversion overflow occurred.
     #[error(transparent)]
     ChronoRange(#[from] chrono::OutOfRangeError),
 
+    /// A Redis command failed.
     #[error(transparent)]
     Redis(#[from] redis::RedisError),
 
+    /// An arbitrary boxed error bubbled up from user code.
     #[error(transparent)]
     Any(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// Result type used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[must_use]
+/// Create default enqueue options for a job.
 pub fn opts() -> EnqueueOpts {
     EnqueueOpts {
         queue: "default".into(),
@@ -69,6 +98,7 @@ pub fn opts() -> EnqueueOpts {
     }
 }
 
+/// Builder for enqueueing jobs by explicit class name.
 pub struct EnqueueOpts {
     queue: String,
     retry: RetryOpts,
@@ -78,6 +108,7 @@ pub struct EnqueueOpts {
 
 impl EnqueueOpts {
     #[must_use]
+    /// Override the target queue.
     pub fn queue<S: Into<String>>(self, queue: S) -> Self {
         Self {
             queue: queue.into(),
@@ -86,6 +117,7 @@ impl EnqueueOpts {
     }
 
     #[must_use]
+    /// Override the retry policy for the job.
     pub fn retry<RO>(self, retry: RO) -> Self
     where
         RO: Into<RetryOpts>,
@@ -97,6 +129,7 @@ impl EnqueueOpts {
     }
 
     #[must_use]
+    /// Make a job unique for the provided duration.
     pub fn unique_for(self, unique_for: std::time::Duration) -> Self {
         Self {
             unique_for: Some(unique_for),
@@ -105,6 +138,7 @@ impl EnqueueOpts {
     }
 
     #[must_use]
+    /// Route retries to a different queue.
     pub fn retry_queue(self, retry_queue: String) -> Self {
         Self {
             retry_queue: Some(retry_queue),
@@ -112,6 +146,7 @@ impl EnqueueOpts {
         }
     }
 
+    /// Create a raw Sidekiq job payload without enqueueing it.
     pub fn create_job(&self, class: String, args: impl serde::Serialize) -> Result<Job> {
         let args = serde_json::to_value(args)?;
 
@@ -144,6 +179,7 @@ impl EnqueueOpts {
         })
     }
 
+    /// Enqueue a job for immediate execution.
     pub async fn perform_async(
         self,
         redis: &RedisPool,
@@ -155,6 +191,7 @@ impl EnqueueOpts {
         Ok(())
     }
 
+    /// Enqueue a job to run after the provided delay.
     pub async fn perform_in(
         &self,
         redis: &RedisPool,
@@ -180,7 +217,7 @@ pub async fn perform_async(
 }
 
 /// Helper function for enqueueing a worker into sidekiq.
-/// This can be used to enqueue a job for a ruby sidekiq worker to process.
+/// This can be used to enqueue a delayed job for a ruby Sidekiq worker to process.
 pub async fn perform_in(
     redis: &RedisPool,
     duration: std::time::Duration,
@@ -200,6 +237,7 @@ fn new_jid() -> String {
     hex::encode(bytes)
 }
 
+/// Strongly typed enqueue options bound to a concrete [`Worker`] implementation.
 pub struct WorkerOpts<Args, W: Worker<Args> + ?Sized> {
     queue: String,
     retry: RetryOpts,
@@ -214,6 +252,7 @@ where
     W: Worker<Args>,
 {
     #[must_use]
+    /// Create a new set of worker enqueue options.
     pub fn new() -> Self {
         Self {
             queue: "default".into(),
@@ -226,6 +265,7 @@ where
     }
 
     #[must_use]
+    /// Override the retry policy for the worker invocation.
     pub fn retry<RO>(self, retry: RO) -> Self
     where
         RO: Into<RetryOpts>,
@@ -237,6 +277,7 @@ where
     }
 
     #[must_use]
+    /// Route retries for this worker invocation to a different queue.
     pub fn retry_queue<S: Into<String>>(self, retry_queue: S) -> Self {
         Self {
             retry_queue: Some(retry_queue.into()),
@@ -245,6 +286,7 @@ where
     }
 
     #[must_use]
+    /// Override the queue for this worker invocation.
     pub fn queue<S: Into<String>>(self, queue: S) -> Self {
         Self {
             queue: queue.into(),
@@ -253,6 +295,7 @@ where
     }
 
     #[must_use]
+    /// Make this worker invocation unique for the provided duration.
     pub fn unique_for(self, unique_for: std::time::Duration) -> Self {
         Self {
             unique_for: Some(unique_for),
@@ -261,10 +304,12 @@ where
     }
 
     #[allow(clippy::wrong_self_convention)]
+    /// Convert worker-specific options into generic enqueue options.
     pub fn into_opts(&self) -> EnqueueOpts {
         self.into()
     }
 
+    /// Enqueue the worker for immediate execution.
     pub async fn perform_async(
         &self,
         redis: &RedisPool,
@@ -275,6 +320,7 @@ where
             .await
     }
 
+    /// Enqueue the worker to run after the provided delay.
     pub async fn perform_in(
         &self,
         redis: &RedisPool,
@@ -305,6 +351,7 @@ impl<Args, W: Worker<Args>> Default for WorkerOpts<Args, W> {
 }
 
 #[async_trait]
+/// Trait implemented by all Rust workers processed by this crate.
 pub trait Worker<Args>: Send + Sync {
     /// Signal to WorkerRef to not attempt to modify the JsonValue args
     /// before calling the perform function. This is useful if the args
@@ -315,6 +362,7 @@ pub trait Worker<Args>: Send + Sync {
     }
 
     #[must_use]
+    /// Return the default enqueue options for this worker type.
     fn opts() -> WorkerOpts<Args, Self>
     where
         Self: Sized,
@@ -324,12 +372,12 @@ pub trait Worker<Args>: Send + Sync {
 
     // TODO: Make configurable through opts and make opts accessible to the
     // retry middleware through a Box<dyn Worker>.
+    /// Return the maximum number of retries allowed for failed jobs.
     fn max_retries(&self) -> usize {
         25
     }
 
-    /// Derive a class_name from the Worker type to be used with sidekiq. By default
-    /// this method will
+    /// Derive a Sidekiq class name from the worker type.
     #[must_use]
     fn class_name() -> String
     where
@@ -342,6 +390,7 @@ pub trait Worker<Args>: Send + Sync {
         name.to_case(Case::UpperCamel)
     }
 
+    /// Enqueue this worker for immediate execution using [`Worker::opts`].
     async fn perform_async(redis: &RedisPool, args: Args) -> Result<()>
     where
         Self: Sized,
@@ -350,6 +399,7 @@ pub trait Worker<Args>: Send + Sync {
         Self::opts().perform_async(redis, args).await
     }
 
+    /// Enqueue this worker to run after the provided delay using [`Worker::opts`].
     async fn perform_in(redis: &RedisPool, duration: std::time::Duration, args: Args) -> Result<()>
     where
         Self: Sized,
@@ -358,6 +408,7 @@ pub trait Worker<Args>: Send + Sync {
         Self::opts().perform_in(redis, duration, args).await
     }
 
+    /// Execute the job with strongly typed arguments.
     async fn perform(&self, args: Args) -> Result<()>;
 }
 
@@ -366,6 +417,7 @@ pub trait Worker<Args>: Send + Sync {
 // we can wrap that generic work in a callback that shares the same type.
 // I'm sure this has a fancy name, but I don't know what it is.
 #[derive(Clone)]
+/// Type-erased wrapper used internally to store registered workers.
 pub struct WorkerRef {
     #[allow(clippy::type_complexity)]
     work_fn: Arc<
@@ -423,19 +475,25 @@ impl WorkerRef {
     }
 
     #[must_use]
+    /// Return the worker's configured maximum retry count.
     pub fn max_retries(&self) -> usize {
         self.max_retries
     }
 
+    /// Invoke the wrapped worker with JSON arguments.
     pub async fn call(&self, args: JsonValue) -> Result<()> {
         (Arc::clone(&self.work_fn))(args).await
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Retry policy serialized into Sidekiq-compatible job payloads.
 pub enum RetryOpts {
+    /// Use the worker's default retry behavior.
     Yes,
+    /// Disable retries for the job.
     Never,
+    /// Retry the job at most the provided number of times.
     Max(usize),
 }
 
@@ -527,33 +585,52 @@ impl From<usize> for RetryOpts {
 // }
 //
 #[derive(Serialize, Deserialize, Debug, Clone)]
+/// Raw Sidekiq job payload stored in Redis.
 pub struct Job {
+    /// Queue name without the `queue:` Redis prefix.
     pub queue: String,
+    /// Serialized job arguments.
     pub args: JsonValue,
+    /// Retry policy for the job.
     pub retry: RetryOpts,
+    /// Sidekiq worker class name.
     pub class: String,
+    /// Unique job identifier.
     pub jid: String,
+    /// Job creation timestamp as a Unix timestamp in seconds.
     pub created_at: f64,
+    /// Time when the job was pushed to its queue.
     pub enqueued_at: Option<f64>,
+    /// Time when the job first failed.
     pub failed_at: Option<f64>,
+    /// Last recorded error message.
     pub error_message: Option<String>,
+    /// Last recorded error class name.
     pub error_class: Option<String>,
+    /// Number of retry attempts already performed.
     pub retry_count: Option<usize>,
+    /// Time when the job was last retried.
     pub retried_at: Option<f64>,
+    /// Optional queue name used for retries.
     pub retry_queue: Option<String>,
 
     #[serde(skip)]
+    /// Duration used for de-duplication when unique jobs are enabled.
     pub unique_for: Option<std::time::Duration>,
 }
 
 #[derive(Debug)]
+/// A fetched job together with the Redis queue key it belongs to.
 pub struct UnitOfWork {
+    /// Redis queue key, usually in the form `queue:<name>`.
     pub queue: String,
+    /// Job payload to execute.
     pub job: Job,
 }
 
 impl UnitOfWork {
     #[must_use]
+    /// Wrap a raw [`Job`] into a [`UnitOfWork`].
     pub fn from_job(job: Job) -> Self {
         Self {
             queue: format!("queue:{}", &job.queue),
@@ -561,11 +638,13 @@ impl UnitOfWork {
         }
     }
 
+    /// Deserialize a [`Job`] from JSON and wrap it in a [`UnitOfWork`].
     pub fn from_job_string(job_str: String) -> Result<Self> {
         let job: Job = serde_json::from_str(&job_str)?;
         Ok(Self::from_job(job))
     }
 
+    /// Push the job into Redis immediately.
     pub async fn enqueue(&self, redis: &RedisPool) -> Result<()> {
         let mut redis = redis.get().await?;
         self.enqueue_direct(&mut redis).await
@@ -638,6 +717,7 @@ impl UnitOfWork {
         .await
     }
 
+    /// Schedule the job for retry using Sidekiq's retry sorted set.
     pub async fn reenqueue(&mut self, redis: &RedisPool) -> Result<()> {
         if let Some(retry_count) = self.job.retry_count {
             let retry_at = Self::retry_job_at(retry_count);
@@ -676,6 +756,7 @@ impl UnitOfWork {
         chrono::Utc::now() + chrono::Duration::seconds(seconds_to_delay as i64)
     }
 
+    /// Schedule the job to run after the provided delay.
     pub async fn schedule(
         &mut self,
         redis: &RedisPool,

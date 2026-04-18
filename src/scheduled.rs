@@ -1,16 +1,19 @@
 use crate::{periodic::PeriodicJob, telemetry, RedisPool, UnitOfWork};
 use tracing::{debug, info};
 
+/// Helper for promoting delayed, retry, and periodic jobs into runnable queues.
 pub struct Scheduled {
     redis: RedisPool,
 }
 
 impl Scheduled {
     #[must_use]
+    /// Create a scheduler helper backed by the provided Redis pool.
     pub fn new(redis: RedisPool) -> Self {
         Self { redis }
     }
 
+    /// Move ready jobs from the provided sorted sets into their work queues.
     pub async fn enqueue_jobs(
         &self,
         now: chrono::DateTime<chrono::Utc>,
@@ -55,6 +58,7 @@ impl Scheduled {
         Ok(n)
     }
 
+    /// Enqueue periodic jobs whose next fire time is due.
     pub async fn enqueue_periodic_jobs(
         &self,
         now: chrono::DateTime<chrono::Utc>,

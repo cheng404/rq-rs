@@ -10,9 +10,11 @@ use std::future::Future;
 use std::ops::DerefMut;
 use std::pin::Pin;
 
+/// Connection pool type used by this crate for Redis access.
 pub type RedisPool = Pool<RedisConnectionManager>;
 
 #[derive(Debug)]
+/// `bb8` connection customizer that applies a Redis key namespace.
 pub struct NamespaceCustomizer {
     namespace: String,
 }
@@ -32,6 +34,7 @@ impl CustomizeConnection<RedisConnection, RedisError> for NamespaceCustomizer {
 }
 
 #[must_use]
+/// Create a customizer that prefixes crate-managed Redis keys with `namespace`.
 pub fn with_custom_namespace(namespace: String) -> Box<NamespaceCustomizer> {
     Box::new(NamespaceCustomizer { namespace })
 }
@@ -89,6 +92,7 @@ pub struct RedisConnection {
 
 impl RedisConnection {
     #[must_use]
+    /// Wrap a raw Redis multiplexed connection.
     pub fn new(connection: Connection) -> Self {
         Self {
             connection,
@@ -96,11 +100,13 @@ impl RedisConnection {
         }
     }
 
+    /// Set the namespace used for subsequent commands.
     pub fn set_namespace(&mut self, namespace: String) {
         self.namespace = Some(namespace);
     }
 
     #[must_use]
+    /// Return a new connection wrapper with the provided namespace applied.
     pub fn with_namespace(self, namespace: String) -> Self {
         Self {
             connection: self.connection,
@@ -134,6 +140,7 @@ impl RedisConnection {
         &mut self.connection
     }
 
+    /// Perform a blocking pop against a list of namespaced queues.
     pub async fn brpop(
         &mut self,
         keys: Vec<String>,
@@ -144,22 +151,26 @@ impl RedisConnection {
             .await
     }
 
+    /// Create a Redis command with a single namespaced key already attached.
     pub fn cmd_with_key(&mut self, cmd: &str, key: String) -> redis::Cmd {
         let mut c = redis::cmd(cmd);
         c.arg(self.namespaced_key(key));
         c
     }
 
+    /// Delete a namespaced key.
     pub async fn del(&mut self, key: String) -> Result<usize, RedisError> {
         self.connection.del(self.namespaced_key(key)).await
     }
 
+    /// Set an expiry in seconds on a namespaced key.
     pub async fn expire(&mut self, key: String, value: usize) -> Result<usize, RedisError> {
         self.connection
             .expire(self.namespaced_key(key), value as i64)
             .await
     }
 
+    /// Left-push a value onto a namespaced list.
     pub async fn lpush<V>(&mut self, key: String, value: V) -> Result<(), RedisError>
     where
         V: ToRedisArgs + Send + Sync,
@@ -167,6 +178,7 @@ impl RedisConnection {
         self.connection.lpush(self.namespaced_key(key), value).await
     }
 
+    /// Add a member to a namespaced set.
     pub async fn sadd<V>(&mut self, key: String, value: V) -> Result<(), RedisError>
     where
         V: ToRedisArgs + Send + Sync,
@@ -174,6 +186,7 @@ impl RedisConnection {
         self.connection.sadd(self.namespaced_key(key), value).await
     }
 
+    /// Execute `SET key value NX EX ttl`.
     pub async fn set_nx_ex<V>(
         &mut self,
         key: String,
@@ -193,6 +206,7 @@ impl RedisConnection {
             .await
     }
 
+    /// Read a range from a namespaced sorted set.
     pub async fn zrange(
         &mut self,
         key: String,
@@ -204,6 +218,7 @@ impl RedisConnection {
             .await
     }
 
+    /// Read a score-bounded range from a namespaced sorted set.
     pub async fn zrangebyscore_limit<
         L: ToRedisArgs + ToSingleRedisArg + Send + Sync,
         U: ToRedisArgs + ToSingleRedisArg + Sync + Send,
@@ -220,6 +235,7 @@ impl RedisConnection {
             .await
     }
 
+    /// Add an item to a namespaced sorted set.
     pub async fn zadd<
         V: ToRedisArgs + ToSingleRedisArg + Send + Sync,
         S: ToRedisArgs + ToSingleRedisArg + Send + Sync,
@@ -234,6 +250,7 @@ impl RedisConnection {
             .await
     }
 
+    /// Add an item to a namespaced sorted set and return whether it changed.
     pub async fn zadd_ch<V: ToRedisArgs + Send + Sync, S: ToRedisArgs + Send + Sync>(
         &mut self,
         key: String,
@@ -249,6 +266,7 @@ impl RedisConnection {
             .await
     }
 
+    /// Remove an item from a namespaced sorted set.
     pub async fn zrem<V>(&mut self, key: String, value: V) -> Result<usize, RedisError>
     where
         V: ToRedisArgs + Send + Sync,

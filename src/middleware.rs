@@ -6,7 +6,9 @@ use tokio::sync::RwLock;
 use tracing::error;
 
 #[async_trait]
+/// Middleware invoked around worker execution on the server side.
 pub trait ServerMiddleware {
+    /// Execute this middleware and optionally delegate to the next middleware.
     async fn call(
         &self,
         iter: ChainIter,
@@ -17,7 +19,7 @@ pub trait ServerMiddleware {
 }
 
 /// A pseudo iterator used to know which middleware should be called next.
-/// This is created by the Chain type.
+/// This is created by the middleware chain.
 #[derive(Clone)]
 pub struct ChainIter {
     stack: Arc<RwLock<Vec<Box<dyn ServerMiddleware + Send + Sync>>>>,
@@ -26,6 +28,7 @@ pub struct ChainIter {
 
 impl ChainIter {
     #[inline]
+    /// Invoke the next middleware in the chain.
     pub async fn next(&self, job: &Job, worker: Arc<WorkerRef>, redis: RedisPool) -> Result<()> {
         let stack = self.stack.read().await;
 
@@ -103,6 +106,7 @@ impl Chain {
     }
 }
 
+/// Built-in middleware that tracks the number of busy jobs for Sidekiq-compatible stats.
 pub struct StatsMiddleware {
     busy_count: Counter,
 }
