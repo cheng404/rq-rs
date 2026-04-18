@@ -173,7 +173,7 @@ impl StatsPublisher {
 /// Publishes processor process statistics to OpenTelemetry metrics.
 pub struct OpenTelemetryStatsPublisher {
     started_at: chrono::DateTime<chrono::Utc>,
-    busy_jobs: Counter,
+    busy_job_counter: Counter,
     concurrency: usize,
     attributes: Vec<KeyValue>,
     info: Gauge<u64>,
@@ -206,7 +206,7 @@ impl OpenTelemetryStatsPublisher {
 
         Self {
             started_at,
-            busy_jobs,
+            busy_job_counter: busy_jobs,
             concurrency,
             attributes,
             info: meter
@@ -240,7 +240,8 @@ impl OpenTelemetryStatsPublisher {
         self.info.record(1, attributes);
         self.heartbeat
             .record(chrono::Utc::now().timestamp() as u64, attributes);
-        self.busy.record(self.busy_jobs.value() as u64, attributes);
+        self.busy
+            .record(self.busy_job_counter.value() as u64, attributes);
         self.concurrency_limit
             .record(self.concurrency as u64, attributes);
         self.started_at_unix

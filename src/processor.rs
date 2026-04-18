@@ -508,7 +508,7 @@ impl Processor {
                             }
                         }
 
-                        debug!("Broke out of loop web metrics");
+                        debug!("Broke out of SidekiqWeb metrics loop");
                     }
                 });
             }
@@ -548,7 +548,7 @@ impl Processor {
                             }
                         }
 
-                        debug!("Broke out of loop OpenTelemetry metrics");
+                        debug!("Broke out of OpenTelemetry metrics loop");
                     }
                 });
             }
