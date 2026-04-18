@@ -131,16 +131,6 @@ impl StatsPublisher {
     }
 
     async fn create_process_stats(&self) -> Result<ProcessStats, Box<dyn std::error::Error>> {
-        #[cfg(feature = "rss-stats")]
-        let rss_in_kb = format!(
-            "{}",
-            simple_process_stats::ProcessStats::get()
-                .await?
-                .memory_usage_bytes
-                / 1024
-        );
-
-        #[cfg(not(feature = "rss-stats"))]
         let rss_in_kb = "0".to_string();
 
         Ok(ProcessStats {

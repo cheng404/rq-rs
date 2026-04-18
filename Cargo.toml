@@ -10,13 +10,6 @@ keywords = ["sidekiq", "worker", "tokio", "ruby"]
 license = "MIT"
 readme = "README.md"
 
-[features]
-default = ["rss-stats"]
-
-# There is currently a dependency bug for mac in the `darwin-libproc` crate making it so
-# cargo cannot resolve deps. Once resolved we may choose to remove this feature flag.
-rss-stats = ["dep:simple-process-stats"]
-
 [lib]
 name = "sidekiq"
 
@@ -35,7 +28,6 @@ chrono = "0.4"
 rand = "0.8"
 hex = "0.4"
 cron_clock = "0.8"
-simple-process-stats = { version = "1", optional = true }
 sha2 = "0.10"
 convert_case = "0.11"
 
