@@ -13,6 +13,10 @@ readme = "README.md"
 [lib]
 name = "sidekiq"
 
+[features]
+default = []
+opentelemetry = ["dep:opentelemetry"]
+
 [dependencies]
 gethostname = "1"
 tokio = { version = "1", features = ["full"] }
@@ -32,7 +36,9 @@ sha2 = "0.10"
 convert_case = "0.11"
 
 tracing = "0.1"
+opentelemetry = { version = "0.31", optional = true, default-features = false, features = ["metrics"] }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serial_test = "3"
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "experimental_metrics_custom_reader"] }

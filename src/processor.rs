@@ -1,7 +1,7 @@
 use super::Result;
 use crate::{
-    periodic::PeriodicJob, telemetry, Chain, Counter, Job, RedisPool, Scheduled,
-    ServerMiddleware, StatsPublisher, UnitOfWork, Worker, WorkerRef,
+    periodic::PeriodicJob, telemetry, Chain, Counter, Job, RedisPool, Scheduled, ServerMiddleware,
+    StatsPublisher, UnitOfWork, Worker, WorkerRef,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -63,6 +63,40 @@ pub struct ProcessorConfig {
     /// Queue-specific configurations. The queues specified in this field do not need to match
     /// the list of queues provided to [`Processor::new`].
     pub queue_configs: BTreeMap<String, QueueConfig>,
+
+    /// Controls how the processor publishes its process stats.
+    pub process_stats: ProcessStatsMode,
+}
+
+#[derive(Clone, Default)]
+#[non_exhaustive]
+/// Controls how processor process stats are published.
+pub enum ProcessStatsMode {
+    /// Continue publishing Sidekiq-web-style process stats to Redis.
+    #[default]
+    SidekiqWeb,
+    /// Disable process stats publishing.
+    Disabled,
+    /// Export process stats as OpenTelemetry metrics instead of writing Redis process hashes.
+    #[cfg(feature = "opentelemetry")]
+    OpenTelemetry(OpenTelemetryProcessMetrics),
+}
+
+#[cfg(feature = "opentelemetry")]
+#[derive(Clone)]
+/// OpenTelemetry configuration for processor process stats.
+pub struct OpenTelemetryProcessMetrics {
+    /// Meter used to create and record the processor process metrics.
+    pub meter: opentelemetry::metrics::Meter,
+}
+
+#[cfg(feature = "opentelemetry")]
+impl OpenTelemetryProcessMetrics {
+    #[must_use]
+    /// Create a new OpenTelemetry process metrics configuration from the provided meter.
+    pub fn new(meter: opentelemetry::metrics::Meter) -> Self {
+        Self { meter }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -110,6 +144,29 @@ impl ProcessorConfig {
         self.queue_configs.insert(queue, config);
         self
     }
+
+    #[must_use]
+    /// Override how processor process stats are published.
+    pub fn process_stats(mut self, process_stats: ProcessStatsMode) -> Self {
+        self.process_stats = process_stats;
+        self
+    }
+
+    #[must_use]
+    /// Disable periodic process stats publishing.
+    pub fn disable_process_stats(mut self) -> Self {
+        self.process_stats = ProcessStatsMode::Disabled;
+        self
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    #[must_use]
+    /// Export process stats through OpenTelemetry instead of publishing Sidekiq-web Redis hashes.
+    pub fn opentelemetry_process_metrics(mut self, meter: opentelemetry::metrics::Meter) -> Self {
+        self.process_stats =
+            ProcessStatsMode::OpenTelemetry(OpenTelemetryProcessMetrics::new(meter));
+        self
+    }
 }
 
 impl Default for ProcessorConfig {
@@ -118,6 +175,7 @@ impl Default for ProcessorConfig {
             num_workers: num_cpus::get(),
             balance_strategy: Default::default(),
             queue_configs: Default::default(),
+            process_stats: Default::default(),
         }
     }
 }
@@ -337,6 +395,8 @@ impl Processor {
     /// delayed job promotion, and periodic job polling loops.
     pub async fn run(self) {
         let mut join_set: JoinSet<()> = JoinSet::new();
+        let process_stats_mode = self.config.process_stats.clone();
+        let shared_worker_count = self.config.num_workers;
 
         if telemetry::emit_lifecycle_traces() {
             info!(
@@ -411,43 +471,88 @@ impl Processor {
             }
         }
 
-        // Start sidekiq-web metrics publisher.
-        join_set.spawn({
-            let redis = self.redis.clone();
-            let queues = self.human_readable_queues.clone();
-            let busy_jobs = self.busy_jobs.clone();
-            let cancellation_token = self.cancellation_token.clone();
-            async move {
-                let hostname = if let Some(host) = gethostname::gethostname().to_str() {
-                    host.to_string()
-                } else {
-                    "UNKNOWN_HOSTNAME".to_string()
-                };
+        match process_stats_mode {
+            ProcessStatsMode::Disabled => {}
+            ProcessStatsMode::SidekiqWeb => {
+                join_set.spawn({
+                    let redis = self.redis.clone();
+                    let queues = self.human_readable_queues.clone();
+                    let busy_jobs = self.busy_jobs.clone();
+                    let cancellation_token = self.cancellation_token.clone();
+                    async move {
+                        let stats_publisher = StatsPublisher::new(
+                            processor_hostname(),
+                            queues,
+                            busy_jobs,
+                            shared_worker_count,
+                        );
 
-                let stats_publisher =
-                    StatsPublisher::new(hostname, queues, busy_jobs, self.config.num_workers);
-
-                if telemetry::emit_verbose_traces() {
-                    info!(status = "start", worker_type = "stats_publisher", "processor.stats_started");
-                }
-
-                loop {
-                    // TODO: Use process count to meet a 5 second avg.
-                    select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                        _ = cancellation_token.cancelled() => {
-                            break;
+                        if telemetry::emit_verbose_traces() {
+                            info!(
+                                status = "start",
+                                worker_type = "stats_publisher",
+                                "processor.stats_started"
+                            );
                         }
-                    }
 
-                    if let Err(err) = stats_publisher.publish_stats(redis.clone()).await {
-                        error!("Error publishing processor stats: {:?}", err);
-                    }
-                }
+                        loop {
+                            select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                                _ = cancellation_token.cancelled() => {
+                                    break;
+                                }
+                            }
 
-                debug!("Broke out of loop web metrics");
+                            if let Err(err) = stats_publisher.publish_stats(redis.clone()).await {
+                                error!("Error publishing processor stats: {:?}", err);
+                            }
+                        }
+
+                        debug!("Broke out of SidekiqWeb metrics loop");
+                    }
+                });
             }
-        });
+            #[cfg(feature = "opentelemetry")]
+            ProcessStatsMode::OpenTelemetry(otel_config) => {
+                join_set.spawn({
+                    let queues = self.human_readable_queues.clone();
+                    let busy_jobs = self.busy_jobs.clone();
+                    let cancellation_token = self.cancellation_token.clone();
+                    async move {
+                        let stats_publisher = crate::stats::OpenTelemetryStatsPublisher::new(
+                            processor_hostname(),
+                            queues,
+                            busy_jobs,
+                            shared_worker_count,
+                            otel_config.meter,
+                        );
+
+                        if telemetry::emit_verbose_traces() {
+                            info!(
+                                status = "start",
+                                worker_type = "stats_publisher",
+                                "processor.stats_started"
+                            );
+                        }
+
+                        loop {
+                            select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                                _ = cancellation_token.cancelled() => {
+                                    break;
+                                }
+                            }
+
+                            if let Err(err) = stats_publisher.publish_stats().await {
+                                error!("Error publishing processor stats: {:?}", err);
+                            }
+                        }
+
+                        debug!("Broke out of OpenTelemetry metrics loop");
+                    }
+                });
+            }
+        }
 
         // Start retry and scheduled routines.
         join_set.spawn({
@@ -458,7 +563,11 @@ impl Processor {
                 let sorted_sets = vec!["retry".to_string(), "schedule".to_string()];
 
                 if telemetry::emit_verbose_traces() {
-                    info!(status = "start", worker_type = "scheduled_poller", "processor.scheduled_poller_started");
+                    info!(
+                        status = "start",
+                        worker_type = "scheduled_poller",
+                        "processor.scheduled_poller_started"
+                    );
                 }
 
                 loop {
@@ -487,7 +596,11 @@ impl Processor {
                 let sched = Scheduled::new(redis);
 
                 if telemetry::emit_verbose_traces() {
-                    info!(status = "start", worker_type = "periodic_poller", "processor.periodic_poller_started");
+                    info!(
+                        status = "start",
+                        worker_type = "periodic_poller",
+                        "processor.periodic_poller_started"
+                    );
                 }
 
                 loop {
@@ -515,7 +628,11 @@ impl Processor {
         }
 
         if telemetry::emit_lifecycle_traces() {
-            info!(status = "stop", worker_type = "processor", "processor.stopped");
+            info!(
+                status = "stop",
+                worker_type = "processor",
+                "processor.stopped"
+            );
         }
     }
 
@@ -525,5 +642,13 @@ impl Processor {
         M: ServerMiddleware + Send + Sync + 'static,
     {
         self.chain.using(Box::new(middleware)).await;
+    }
+}
+
+fn processor_hostname() -> String {
+    if let Some(host) = gethostname::gethostname().to_str() {
+        host.to_string()
+    } else {
+        "UNKNOWN_HOSTNAME".to_string()
     }
 }

@@ -46,7 +46,11 @@ pub use crate::redis::{
 };
 pub use ::redis as redis_rs;
 pub use middleware::{ChainIter, ServerMiddleware};
-pub use processor::{BalanceStrategy, Processor, ProcessorConfig, QueueConfig, WorkFetcher};
+#[cfg(feature = "opentelemetry")]
+pub use processor::OpenTelemetryProcessMetrics;
+pub use processor::{
+    BalanceStrategy, ProcessStatsMode, Processor, ProcessorConfig, QueueConfig, WorkFetcher,
+};
 pub use scheduled::Scheduled;
 pub use stats::{Counter, StatsPublisher};
 pub use telemetry::{set_tracing_config, tracing_config, TracingConfig, TracingVerbosity};
