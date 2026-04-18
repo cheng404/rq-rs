@@ -57,8 +57,9 @@ to suppress the library's non-error tracing output.
 ## Process Stats
 
 By default, the processor still publishes Sidekiq/Web-compatible process stats to Redis, including
-`busy`, `beat`, `info`, and related fields. This crate no longer depends on platform-specific RSS
-collection, so the published `rss` field now falls back to `"0"` on all platforms.
+`busy`, `beat`, `info`, `rss`, and related fields. The `rss` value is collected from the current
+process with `sysinfo` and is published in kilobytes so Sidekiq Web can show how much resident RAM
+each worker process is currently using.
 
 If you do not need Sidekiq/Web-compatible Redis process hashes, the optional `opentelemetry`
 feature lets you export processor stats as OpenTelemetry gauges instead:

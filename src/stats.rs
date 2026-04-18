@@ -7,7 +7,8 @@ use opentelemetry::{
 use rand::RngCore;
 use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use sysinfo::{get_current_pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 #[derive(Clone)]
 /// Thread-safe counter used for tracking processor state.
@@ -81,6 +82,29 @@ fn generate_identity(hostname: &String) -> String {
     format!("{hostname}:{pid}:{nonce}")
 }
 
+const BYTES_PER_KIB: u64 = 1024;
+
+fn current_process_rss_kb() -> String {
+    let Ok(pid) = get_current_pid() else {
+        return "0".to_string();
+    };
+
+    let system = PROCESS_MEMORY_SYSTEM.get_or_init(|| Mutex::new(System::new()));
+    let mut system = system.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
+
+    system
+        .process(pid)
+        .map(|process| (process.memory() / BYTES_PER_KIB).to_string())
+        .unwrap_or_else(|| "0".to_string())
+}
+
+static PROCESS_MEMORY_SYSTEM: OnceLock<Mutex<System>> = OnceLock::new();
+
 impl StatsPublisher {
     #[must_use]
     /// Create a new stats publisher for a processor instance.
@@ -144,13 +168,11 @@ impl StatsPublisher {
     }
 
     async fn create_process_stats(&self) -> Result<ProcessStats, Box<dyn std::error::Error>> {
-        let rss_in_kb = "0".to_string();
-
         Ok(ProcessStats {
             rtt_us: "0".into(),
             busy: self.busy_jobs.value(),
             quiet: false,
-            rss: rss_in_kb,
+            rss: current_process_rss_kb(),
 
             beat: chrono::Utc::now(),
             info: ProcessInfo {
@@ -251,8 +273,22 @@ impl OpenTelemetryStatsPublisher {
     }
 }
 
-#[cfg(all(test, feature = "opentelemetry"))]
+#[cfg(test)]
 mod tests {
+    use super::current_process_rss_kb;
+
+    #[test]
+    fn collects_current_process_rss_in_kb() {
+        let rss_kb = current_process_rss_kb()
+            .parse::<u64>()
+            .expect("rss should be a valid integer");
+
+        assert!(rss_kb > 0, "rss should be greater than zero");
+    }
+}
+
+#[cfg(all(test, feature = "opentelemetry"))]
+mod opentelemetry_tests {
     use super::{Counter, OpenTelemetryStatsPublisher};
     use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::error::OTelSdkResult;
