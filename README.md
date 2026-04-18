@@ -34,6 +34,27 @@ rusty-sidekiq = { version = "0.13", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
+## Tracing
+
+The crate emits structured `tracing` events for enqueueing, scheduling, retries, periodic jobs,
+and worker execution. Applications remain responsible for installing their own subscriber:
+
+```rust
+use sidekiq::{set_tracing_config, TracingConfig, TracingVerbosity};
+use tracing_subscriber::{fmt, EnvFilter};
+
+set_tracing_config(TracingConfig::default().verbosity(TracingVerbosity::Verbose));
+
+fmt()
+    .with_env_filter(EnvFilter::from_default_env())
+    .json()
+    .init();
+```
+
+`TracingVerbosity::Lifecycle` is the default and emits the core lifecycle events. Use
+`TracingVerbosity::Verbose` to include fetch/deduplication details, or `TracingVerbosity::Off`
+to suppress the library's non-error tracing output.
+
 ## Runtime Requirements
 
 - A Redis server reachable by your application.

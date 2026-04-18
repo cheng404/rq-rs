@@ -1,9 +1,12 @@
 use super::Result;
-use crate::{new_jid, Error, Job, Processor, RedisConnection, RedisPool, RetryOpts, Worker};
+use crate::{
+    new_jid, telemetry, Error, Job, Processor, RedisConnection, RedisPool, RetryOpts, Worker,
+};
 pub use cron_clock::{Schedule as Cron, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::str::FromStr;
+use tracing::{debug, info};
 
 pub fn parse(cron: &str) -> Result<Cron> {
     Ok(Cron::from_str(cron)?)
@@ -12,6 +15,9 @@ pub fn parse(cron: &str) -> Result<Cron> {
 pub async fn destroy_all(redis: RedisPool) -> Result<()> {
     let mut conn = redis.get().await?;
     conn.del("periodic".to_string()).await?;
+    if telemetry::emit_verbose_traces() {
+        debug!(worker_type = "periodic", status = "cleared", "periodic.destroy_all");
+    }
     Ok(())
 }
 
@@ -149,7 +155,21 @@ impl PeriodicJob {
 
     pub async fn insert(&self, conn: &mut RedisConnection) -> Result<bool> {
         let payload = serde_json::to_string(self)?;
-        self.update(conn, &payload).await
+        let inserted = self.update(conn, &payload).await?;
+
+        if inserted && telemetry::emit_lifecycle_traces() {
+            info!(
+                status = "registered",
+                class = %self.class,
+                queue = %self.queue.clone().unwrap_or_else(|| "default".to_string()),
+                cron = %self.cron,
+                worker_type = "periodic",
+                name = %self.name,
+                "periodic.registered"
+            );
+        }
+
+        Ok(inserted)
     }
 
     pub async fn update(&self, conn: &mut RedisConnection, periodic_job_str: &str) -> Result<bool> {

@@ -1,5 +1,5 @@
 use super::Result;
-use crate::{Counter, Job, RedisPool, RetryOpts, UnitOfWork, WorkerRef};
+use crate::{telemetry, Counter, Job, RedisPool, RetryOpts, UnitOfWork, WorkerRef};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -192,6 +192,7 @@ impl ServerMiddleware for RetryMiddleware {
                 "class" = &job.class,
                 "jid" = &job.jid,
                 "queue" = &job.queue,
+                "retry_count" = retry_count,
                 "err" = &job.error_message
             }, "Max retries exceeded, will not reschedule job");
         } else {
@@ -201,8 +202,21 @@ impl ServerMiddleware for RetryMiddleware {
                 "jid" = &job.jid,
                 "queue" = &job.queue,
                 "retry_queue" = &job.retry_queue,
+                "retry_count" = retry_count,
                 "err" = &job.error_message
             }, "Scheduling job for retry in the future");
+
+            if telemetry::emit_verbose_traces() {
+                error!(
+                    status = "retrying",
+                    class = %job.class,
+                    jid = %job.jid,
+                    queue = %job.queue,
+                    retry_count,
+                    worker_type = "retry",
+                    "job.retrying"
+                );
+            }
 
             // We will now make sure we use the new retry_queue option if set.
             if let Some(ref retry_queue) = job.retry_queue {

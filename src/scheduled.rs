@@ -1,5 +1,5 @@
-use crate::{periodic::PeriodicJob, RedisPool, UnitOfWork};
-use tracing::debug;
+use crate::{periodic::PeriodicJob, telemetry, RedisPool, UnitOfWork};
+use tracing::{debug, info};
 
 pub struct Scheduled {
     redis: RedisPool,
@@ -35,6 +35,18 @@ impl Scheduled {
 
                     work.enqueue_direct(&mut redis).await?;
 
+                    if telemetry::emit_lifecycle_traces() {
+                        info!(
+                            status = "promoted",
+                            jid = %work.job.jid,
+                            class = %work.job.class,
+                            queue = %work.job.queue,
+                            retry_count = work.job.retry_count.unwrap_or(0),
+                            worker_type = "scheduled",
+                            "job.promoted"
+                        );
+                    }
+
                     n += 1;
                 }
             }
@@ -69,6 +81,20 @@ impl Scheduled {
                 }, "Enqueueing periodic job");
 
                 work.enqueue_direct(&mut conn).await?;
+
+                if telemetry::emit_lifecycle_traces() {
+                    info!(
+                        status = "enqueued",
+                        jid = %work.job.jid,
+                        class = %work.job.class,
+                        queue = %work.job.queue,
+                        retry_count = work.job.retry_count.unwrap_or(0),
+                        worker_type = "periodic",
+                        cron = %pj.cron,
+                        name = %pj.name,
+                        "periodic.enqueued"
+                    );
+                }
             }
         }
 
