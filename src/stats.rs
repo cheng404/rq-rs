@@ -1,4 +1,9 @@
 use crate::RedisPool;
+#[cfg(feature = "opentelemetry")]
+use opentelemetry::{
+    metrics::{Gauge, Meter},
+    KeyValue,
+};
 use rand::RngCore;
 use serde::Serialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -161,5 +166,162 @@ impl StatsPublisher {
                 tag: None,
             },
         })
+    }
+}
+
+#[cfg(feature = "opentelemetry")]
+/// Publishes processor process statistics to OpenTelemetry metrics.
+pub struct OpenTelemetryStatsPublisher {
+    started_at: chrono::DateTime<chrono::Utc>,
+    busy_jobs: Counter,
+    concurrency: usize,
+    attributes: Vec<KeyValue>,
+    info: Gauge<u64>,
+    heartbeat: Gauge<u64>,
+    busy: Gauge<u64>,
+    concurrency_limit: Gauge<u64>,
+    started_at_unix: Gauge<u64>,
+}
+
+#[cfg(feature = "opentelemetry")]
+impl OpenTelemetryStatsPublisher {
+    #[must_use]
+    /// Create a new OpenTelemetry-backed stats publisher for a processor instance.
+    pub fn new(
+        hostname: String,
+        queues: Vec<String>,
+        busy_jobs: Counter,
+        concurrency: usize,
+        meter: Meter,
+    ) -> Self {
+        let identity = generate_identity(&hostname);
+        let started_at = chrono::Utc::now();
+        let pid = std::process::id();
+        let attributes = vec![
+            KeyValue::new("hostname", hostname),
+            KeyValue::new("identity", identity),
+            KeyValue::new("pid", i64::from(pid)),
+            KeyValue::new("queues", queues.join(",")),
+        ];
+
+        Self {
+            started_at,
+            busy_jobs,
+            concurrency,
+            attributes,
+            info: meter
+                .u64_gauge("rusty_sidekiq_processor_info")
+                .with_description("Static metadata for a rusty-sidekiq processor instance.")
+                .build(),
+            heartbeat: meter
+                .u64_gauge("rusty_sidekiq_processor_heartbeat_unix_time")
+                .with_unit("s")
+                .with_description("Unix timestamp of the most recent processor heartbeat.")
+                .build(),
+            busy: meter
+                .u64_gauge("rusty_sidekiq_processor_busy_jobs")
+                .with_description("Number of jobs currently being processed by this processor.")
+                .build(),
+            concurrency_limit: meter
+                .u64_gauge("rusty_sidekiq_processor_concurrency")
+                .with_description("Configured worker concurrency for this processor.")
+                .build(),
+            started_at_unix: meter
+                .u64_gauge("rusty_sidekiq_processor_started_at_unix_time")
+                .with_unit("s")
+                .with_description("Unix timestamp of when this processor instance started.")
+                .build(),
+        }
+    }
+
+    /// Publish one heartbeat payload to OpenTelemetry.
+    pub async fn publish_stats(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let attributes = self.attributes.as_slice();
+        self.info.record(1, attributes);
+        self.heartbeat
+            .record(chrono::Utc::now().timestamp() as u64, attributes);
+        self.busy.record(self.busy_jobs.value() as u64, attributes);
+        self.concurrency_limit
+            .record(self.concurrency as u64, attributes);
+        self.started_at_unix
+            .record(self.started_at.timestamp() as u64, attributes);
+
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "opentelemetry"))]
+mod tests {
+    use super::{Counter, OpenTelemetryStatsPublisher};
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::{
+        data::{AggregatedMetrics, MetricData, ResourceMetrics},
+        reader::MetricReader,
+        ManualReader, SdkMeterProvider,
+    };
+    use std::sync::Arc;
+
+    fn read_gauge_value(metrics: &ResourceMetrics, name: &str) -> Option<u64> {
+        metrics.scope_metrics().find_map(|scope_metrics| {
+            scope_metrics.metrics().find_map(|metric| {
+                if metric.name() != name {
+                    return None;
+                }
+
+                match metric.data() {
+                    AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
+                        gauge.data_points().next().map(|point| point.value())
+                    }
+                    _ => None,
+                }
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn open_telemetry_stats_publisher_records_processor_metrics() {
+        let reader = Arc::new(ManualReader::builder().build());
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        let meter = provider.meter("rq-rs-test");
+
+        let busy_jobs = Counter::new(0);
+        busy_jobs.incrby(3);
+        let publisher = OpenTelemetryStatsPublisher::new(
+            "test-host".to_string(),
+            vec!["default".to_string(), "critical".to_string()],
+            busy_jobs,
+            8,
+            meter,
+        );
+
+        publisher.publish_stats().await.unwrap();
+
+        let mut metrics = ResourceMetrics::default();
+        reader.collect(&mut metrics).unwrap();
+
+        assert_eq!(
+            read_gauge_value(&metrics, "rusty_sidekiq_processor_info"),
+            Some(1)
+        );
+        assert_eq!(
+            read_gauge_value(&metrics, "rusty_sidekiq_processor_busy_jobs"),
+            Some(3)
+        );
+        assert_eq!(
+            read_gauge_value(&metrics, "rusty_sidekiq_processor_concurrency"),
+            Some(8)
+        );
+        assert!(
+            read_gauge_value(&metrics, "rusty_sidekiq_processor_started_at_unix_time")
+                .unwrap_or_default()
+                > 0
+        );
+        assert!(
+            read_gauge_value(&metrics, "rusty_sidekiq_processor_heartbeat_unix_time")
+                .unwrap_or_default()
+                > 0
+        );
     }
 }

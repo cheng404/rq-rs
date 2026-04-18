@@ -24,6 +24,15 @@ rusty-sidekiq = "0.13"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
+To export processor process stats with OpenTelemetry instead of Sidekiq/Web-compatible Redis
+hashes, enable the optional feature:
+
+```toml
+[dependencies]
+rusty-sidekiq = { version = "0.13", features = ["opentelemetry"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
 ## Tracing
 
 The crate emits structured `tracing` events for enqueueing, scheduling, retries, periodic jobs,
@@ -50,6 +59,19 @@ to suppress the library's non-error tracing output.
 The sidekiq-web-style process stats publisher still reports `busy`, `beat`, `info`, and related
 fields, but this crate no longer depends on platform-specific RSS collection. The published `rss`
 field now falls back to `"0"` on all platforms.
+
+If you do not need Sidekiq/Web-compatible Redis process hashes, the optional `opentelemetry`
+feature lets you export processor stats as OpenTelemetry gauges instead:
+
+```rust
+use opentelemetry::global;
+use sidekiq::{Processor, ProcessorConfig};
+
+let meter = global::meter("my-service");
+let config = ProcessorConfig::default().opentelemetry_process_metrics(meter);
+
+let processor = Processor::new(redis.clone(), vec!["default".to_string()]).with_config(config);
+```
 
 ## Runtime Requirements
 
