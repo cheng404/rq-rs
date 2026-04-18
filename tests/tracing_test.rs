@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use bb8::Pool;
 use serial_test::serial;
 use sidekiq::{
-    set_tracing_config, Processor, RedisConnectionManager, RedisPool, Result, TracingConfig,
-    TracingVerbosity, WorkFetcher, Worker,
+    periodic, set_tracing_config, Processor, RedisConnectionManager, RedisPool, Result,
+    Scheduled, TracingConfig, TracingVerbosity, WorkFetcher, Worker,
 };
+use std::time::Duration;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::Level;
@@ -73,6 +74,20 @@ struct TestWorker;
 
 #[async_trait]
 impl Worker<()> for TestWorker {
+    async fn perform(&self, _args: ()) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct UniqueWorker;
+
+#[async_trait]
+impl Worker<()> for UniqueWorker {
+    fn opts() -> sidekiq::WorkerOpts<(), Self> {
+        sidekiq::WorkerOpts::new().unique_for(Duration::from_secs(30))
+    }
+
     async fn perform(&self, _args: ()) -> Result<()> {
         Ok(())
     }
@@ -179,4 +194,135 @@ fn suppresses_lifecycle_events_when_tracing_is_off() {
     assert!(!output.contains("job.enqueued"));
     assert!(!output.contains("job.started"));
     assert!(!output.contains("job.completed"));
+}
+
+#[test]
+#[serial]
+fn emits_deduplication_events_for_unique_jobs() {
+    let output = with_captured_tracing(TracingVerbosity::Verbose, || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let manager = RedisConnectionManager::new("redis://127.0.0.1/").unwrap();
+            let redis = Pool::builder().build(manager).await.unwrap();
+            redis.flushall().await;
+
+            let queue = "unique_trace_queue".to_string();
+            UniqueWorker::opts()
+                .queue(queue.clone())
+                .perform_async(&redis, ())
+                .await
+                .unwrap();
+            UniqueWorker::opts()
+                .queue(queue)
+                .perform_async(&redis, ())
+                .await
+                .unwrap();
+        });
+
+        String::new()
+    });
+
+    assert!(output.contains("job.deduplicated"));
+    assert!(output.contains("\"class\":\"UniqueWorker\""));
+}
+
+#[test]
+#[serial]
+fn emits_promoted_events_for_scheduled_jobs() {
+    let output = with_captured_tracing(TracingVerbosity::Lifecycle, || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let manager = RedisConnectionManager::new("redis://127.0.0.1/").unwrap();
+            let redis = Pool::builder().build(manager).await.unwrap();
+            redis.flushall().await;
+
+            let queue = "scheduled_trace_queue".to_string();
+            let mut processor = Processor::new(redis.clone(), vec![queue.clone()]);
+            processor.register(TestWorker);
+
+            TestWorker::opts()
+                .queue(queue)
+                .perform_in(&redis, Duration::from_secs(1), ())
+                .await
+                .unwrap();
+
+            let scheduler = Scheduled::new(redis);
+            scheduler
+                .enqueue_jobs(
+                    chrono::Utc::now() + chrono::Duration::seconds(2),
+                    &vec!["retry".to_string(), "schedule".to_string()],
+                )
+                .await
+                .unwrap();
+        });
+
+        String::new()
+    });
+
+    assert!(output.contains("job.promoted"));
+    assert!(output.contains("\"worker_type\":\"scheduled\""));
+}
+
+#[test]
+#[serial]
+fn emits_periodic_events_when_periodic_jobs_are_enqueued() {
+    let output = with_captured_tracing(TracingVerbosity::Lifecycle, || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let manager = RedisConnectionManager::new("redis://127.0.0.1/").unwrap();
+            let redis = Pool::builder().build(manager).await.unwrap();
+            redis.flushall().await;
+
+            let queue = "periodic_trace_queue".to_string();
+            let mut processor = Processor::new(redis.clone(), vec![queue.clone()]);
+            periodic::destroy_all(redis.clone()).await.unwrap();
+
+            periodic::builder("*/1 * * * * *")
+                .unwrap()
+                .name("trace periodic job")
+                .queue(queue)
+                .register::<TestWorker, ()>(&mut processor, TestWorker)
+                .await
+                .unwrap();
+
+            let mut conn = redis.get().await.unwrap();
+            let jobs = conn
+                .zrange("periodic".to_string(), 0, -1)
+                .await
+                .unwrap();
+            let job = jobs.into_iter().next().unwrap();
+            conn.zadd(
+                "periodic".to_string(),
+                job,
+                (chrono::Utc::now() - chrono::Duration::seconds(1)).timestamp(),
+            )
+            .await
+            .unwrap();
+            drop(conn);
+
+            let scheduler = Scheduled::new(redis);
+            scheduler
+                .enqueue_periodic_jobs(chrono::Utc::now())
+                .await
+                .unwrap();
+        });
+
+        String::new()
+    });
+
+    assert!(output.contains("periodic.enqueued"));
+    assert!(output.contains("\"worker_type\":\"periodic\""));
+    assert!(output.contains("\"cron\":\"*/1 * * * * *\""));
 }
