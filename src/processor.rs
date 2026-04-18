@@ -1,7 +1,7 @@
 use super::Result;
 use crate::{
-    periodic::PeriodicJob, telemetry, Chain, Counter, Job, RedisPool, Scheduled,
-    ServerMiddleware, StatsPublisher, UnitOfWork, Worker, WorkerRef,
+    periodic::PeriodicJob, telemetry, Chain, Counter, Job, RedisPool, Scheduled, ServerMiddleware,
+    StatsPublisher, UnitOfWork, Worker, WorkerRef,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -162,11 +162,9 @@ impl ProcessorConfig {
     #[cfg(feature = "opentelemetry")]
     #[must_use]
     /// Export process stats through OpenTelemetry instead of publishing Sidekiq-web Redis hashes.
-    pub fn opentelemetry_process_metrics(
-        mut self,
-        meter: opentelemetry::metrics::Meter,
-    ) -> Self {
-        self.process_stats = ProcessStatsMode::OpenTelemetry(OpenTelemetryProcessMetrics::new(meter));
+    pub fn opentelemetry_process_metrics(mut self, meter: opentelemetry::metrics::Meter) -> Self {
+        self.process_stats =
+            ProcessStatsMode::OpenTelemetry(OpenTelemetryProcessMetrics::new(meter));
         self
     }
 }
@@ -490,7 +488,11 @@ impl Processor {
                         );
 
                         if telemetry::emit_verbose_traces() {
-                            info!(status = "start", worker_type = "stats_publisher", "processor.stats_started");
+                            info!(
+                                status = "start",
+                                worker_type = "stats_publisher",
+                                "processor.stats_started"
+                            );
                         }
 
                         loop {
@@ -526,7 +528,11 @@ impl Processor {
                         );
 
                         if telemetry::emit_verbose_traces() {
-                            info!(status = "start", worker_type = "stats_publisher", "processor.stats_started");
+                            info!(
+                                status = "start",
+                                worker_type = "stats_publisher",
+                                "processor.stats_started"
+                            );
                         }
 
                         loop {
@@ -557,7 +563,11 @@ impl Processor {
                 let sorted_sets = vec!["retry".to_string(), "schedule".to_string()];
 
                 if telemetry::emit_verbose_traces() {
-                    info!(status = "start", worker_type = "scheduled_poller", "processor.scheduled_poller_started");
+                    info!(
+                        status = "start",
+                        worker_type = "scheduled_poller",
+                        "processor.scheduled_poller_started"
+                    );
                 }
 
                 loop {
@@ -586,7 +596,11 @@ impl Processor {
                 let sched = Scheduled::new(redis);
 
                 if telemetry::emit_verbose_traces() {
-                    info!(status = "start", worker_type = "periodic_poller", "processor.periodic_poller_started");
+                    info!(
+                        status = "start",
+                        worker_type = "periodic_poller",
+                        "processor.periodic_poller_started"
+                    );
                 }
 
                 loop {
@@ -614,7 +628,11 @@ impl Processor {
         }
 
         if telemetry::emit_lifecycle_traces() {
-            info!(status = "stop", worker_type = "processor", "processor.stopped");
+            info!(
+                status = "stop",
+                worker_type = "processor",
+                "processor.stopped"
+            );
         }
     }
 

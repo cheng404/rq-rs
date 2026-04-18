@@ -254,12 +254,41 @@ impl OpenTelemetryStatsPublisher {
 mod tests {
     use super::{Counter, OpenTelemetryStatsPublisher};
     use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::error::OTelSdkResult;
     use opentelemetry_sdk::metrics::{
         data::{AggregatedMetrics, MetricData, ResourceMetrics},
         reader::MetricReader,
-        ManualReader, SdkMeterProvider,
+        InstrumentKind, ManualReader, Pipeline, SdkMeterProvider, Temporality,
     };
-    use std::sync::Arc;
+    use std::{
+        sync::{Arc, Weak},
+        time::Duration,
+    };
+
+    #[derive(Clone, Debug)]
+    struct SharedReader(Arc<dyn MetricReader>);
+
+    impl MetricReader for SharedReader {
+        fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
+            self.0.register_pipeline(pipeline)
+        }
+
+        fn collect(&self, rm: &mut ResourceMetrics) -> OTelSdkResult {
+            self.0.collect(rm)
+        }
+
+        fn force_flush(&self) -> OTelSdkResult {
+            self.0.force_flush()
+        }
+
+        fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
+            self.0.shutdown()
+        }
+
+        fn temporality(&self, kind: InstrumentKind) -> Temporality {
+            self.0.temporality(kind)
+        }
+    }
 
     fn read_gauge_value(metrics: &ResourceMetrics, name: &str) -> Option<u64> {
         metrics.scope_metrics().find_map(|scope_metrics| {
@@ -280,7 +309,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_telemetry_stats_publisher_records_processor_metrics() {
-        let reader = Arc::new(ManualReader::builder().build());
+        let reader = SharedReader(Arc::new(ManualReader::builder().build()));
         let provider = SdkMeterProvider::builder()
             .with_reader(reader.clone())
             .build();
