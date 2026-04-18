@@ -223,7 +223,7 @@ impl PeriodicJob {
     #[must_use]
     /// Convert the periodic job definition into a runnable [`Job`].
     pub fn into_job(&self) -> Job {
-        let args = self.json_args.clone().expect("always set in contructor");
+        let args = self.json_args.clone().expect("always set in constructor");
 
         Job {
             queue: self.queue.clone().unwrap_or_else(|| "default".to_string()),
