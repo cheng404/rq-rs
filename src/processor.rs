@@ -11,12 +11,16 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, info_span, Instrument};
 
 #[derive(Clone, Eq, PartialEq, Debug)]
+/// Result of attempting to fetch and process one unit of work.
 pub enum WorkFetcher {
+    /// No job was available in Redis.
     NoWorkFound,
+    /// A job was fetched and processed.
     Done,
 }
 
 #[derive(Clone)]
+/// Redis-backed worker runtime that fetches, schedules, and executes jobs.
 pub struct Processor {
     redis: RedisPool,
     queues: VecDeque<String>,
@@ -31,6 +35,7 @@ pub struct Processor {
 
 #[derive(Clone)]
 #[non_exhaustive]
+/// Configuration for a [`Processor`].
 pub struct ProcessorConfig {
     /// The number of Sidekiq workers that can run at the same time. Adjust as needed based on
     /// your workload and resource (cpu/memory/etc) usage.
@@ -62,6 +67,7 @@ pub struct ProcessorConfig {
 
 #[derive(Default, Clone)]
 #[non_exhaustive]
+/// Strategy used to balance fetch priority across queues.
 pub enum BalanceStrategy {
     /// Rotate the list of queues by 1 every time jobs are fetched from Redis. This allows each
     /// queue in the list to have an equal opportunity to have its jobs run.
@@ -75,6 +81,7 @@ pub enum BalanceStrategy {
 
 #[derive(Default, Clone)]
 #[non_exhaustive]
+/// Per-queue processor overrides.
 pub struct QueueConfig {
     /// Similar to `ProcessorConfig#num_workers`, except allows configuring the number of
     /// additional workers to dedicate to a specific queue. If provided, `num_workers` additional
@@ -84,18 +91,21 @@ pub struct QueueConfig {
 
 impl ProcessorConfig {
     #[must_use]
+    /// Set the number of shared worker tasks.
     pub fn num_workers(mut self, num_workers: usize) -> Self {
         self.num_workers = num_workers;
         self
     }
 
     #[must_use]
+    /// Set the queue balancing strategy.
     pub fn balance_strategy(mut self, balance_strategy: BalanceStrategy) -> Self {
         self.balance_strategy = balance_strategy;
         self
     }
 
     #[must_use]
+    /// Add configuration overrides for a specific queue.
     pub fn queue_config(mut self, queue: String, config: QueueConfig) -> Self {
         self.queue_configs.insert(queue, config);
         self
@@ -114,6 +124,7 @@ impl Default for ProcessorConfig {
 
 impl QueueConfig {
     #[must_use]
+    /// Set the number of dedicated workers for this queue.
     pub fn num_workers(mut self, num_workers: usize) -> Self {
         self.num_workers = num_workers;
         self
@@ -122,6 +133,7 @@ impl QueueConfig {
 
 impl Processor {
     #[must_use]
+    /// Create a processor that listens to the provided queues.
     pub fn new(redis: RedisPool, queues: Vec<String>) -> Self {
         let busy_jobs = Counter::new(0);
 
@@ -142,11 +154,13 @@ impl Processor {
         }
     }
 
+    /// Override the processor configuration.
     pub fn with_config(mut self, config: ProcessorConfig) -> Self {
         self.config = config;
         self
     }
 
+    /// Fetch a single job from Redis, if available.
     pub async fn fetch(&mut self) -> Result<Option<UnitOfWork>> {
         self.run_balance_strategy();
 
@@ -177,6 +191,7 @@ impl Processor {
         }
     }
 
+    /// Repeatedly poll until one job is processed or cancellation is requested.
     pub async fn process_one(&mut self) -> Result<()> {
         loop {
             if self.cancellation_token.is_cancelled() {
@@ -191,6 +206,7 @@ impl Processor {
         }
     }
 
+    /// Attempt to fetch and process at most one job.
     pub async fn process_one_tick_once(&mut self) -> Result<WorkFetcher> {
         let work = self.fetch().await?;
 
@@ -276,6 +292,7 @@ impl Processor {
         .await
     }
 
+    /// Register a worker implementation with this processor.
     pub fn register<
         Args: Sync + Send + for<'de> serde::Deserialize<'de> + 'static,
         W: Worker<Args> + 'static,
@@ -287,6 +304,7 @@ impl Processor {
             .insert(W::class_name(), Arc::new(WorkerRef::wrap(Arc::new(worker))));
     }
 
+    /// Return a cancellation token that stops the long-running processor loops.
     pub fn get_cancellation_token(&self) -> CancellationToken {
         self.cancellation_token.clone()
     }
@@ -314,6 +332,9 @@ impl Processor {
 
     /// Takes self to consume the processor. This is for life-cycle management, not
     /// memory safety because you can clone processor pretty easily.
+    ///
+    /// This method starts shared workers, dedicated queue workers, stats publishing,
+    /// delayed job promotion, and periodic job polling loops.
     pub async fn run(self) {
         let mut join_set: JoinSet<()> = JoinSet::new();
 
@@ -498,6 +519,7 @@ impl Processor {
         }
     }
 
+    /// Add a server middleware to the processing chain.
     pub async fn using<M>(&mut self, middleware: M)
     where
         M: ServerMiddleware + Send + Sync + 'static,

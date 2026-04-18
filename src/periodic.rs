@@ -8,10 +8,12 @@ use serde_json::Value as JsonValue;
 use std::str::FromStr;
 use tracing::{debug, info};
 
+/// Parse a cron expression into the schedule type used by this crate.
 pub fn parse(cron: &str) -> Result<Cron> {
     Ok(Cron::from_str(cron)?)
 }
 
+/// Remove all registered periodic jobs from Redis.
 pub async fn destroy_all(redis: RedisPool) -> Result<()> {
     let mut conn = redis.get().await?;
     conn.del("periodic".to_string()).await?;
@@ -21,6 +23,7 @@ pub async fn destroy_all(redis: RedisPool) -> Result<()> {
     Ok(())
 }
 
+/// Builder for registering a periodic job against a [`Processor`].
 pub struct Builder {
     pub(crate) name: Option<String>,
     pub(crate) queue: Option<String>,
@@ -29,6 +32,7 @@ pub struct Builder {
     pub(crate) cron: Cron,
 }
 
+/// Create a periodic job builder from a cron expression.
 pub fn builder(cron_str: &str) -> Result<Builder> {
     Ok(Builder {
         name: None,
@@ -40,6 +44,7 @@ pub fn builder(cron_str: &str) -> Result<Builder> {
 }
 
 impl Builder {
+    /// Set a human-readable name for the periodic job.
     pub fn name<S: Into<String>>(self, name: S) -> Builder {
         Builder {
             name: Some(name.into()),
@@ -48,6 +53,7 @@ impl Builder {
     }
 
     #[must_use]
+    /// Override the retry policy for jobs emitted by this periodic job.
     pub fn retry<RO>(self, retry: RO) -> Builder
     where
         RO: Into<RetryOpts>,
@@ -58,12 +64,14 @@ impl Builder {
         }
     }
 
+    /// Override the queue used by jobs emitted by this periodic job.
     pub fn queue<S: Into<String>>(self, queue: S) -> Builder {
         Builder {
             queue: Some(queue.into()),
             ..self
         }
     }
+    /// Provide serialized arguments for jobs emitted by this periodic job.
     pub fn args<Args>(self, args: Args) -> Result<Builder>
     where
         Args: Sync + Send + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
@@ -83,6 +91,7 @@ impl Builder {
         })
     }
 
+    /// Register the worker and its periodic schedule with the processor.
     pub async fn register<W, Args>(self, processor: &mut Processor, worker: W) -> Result<()>
     where
         Args: Sync + Send + for<'de> serde::Deserialize<'de> + 'static,
@@ -96,6 +105,7 @@ impl Builder {
         Ok(())
     }
 
+    /// Build the raw periodic job payload for a specific Sidekiq class name.
     pub fn into_periodic_job(&self, class_name: String) -> Result<PeriodicJob> {
         let name = self
             .name
@@ -121,6 +131,7 @@ impl Builder {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+/// Serialized representation of a periodic job stored in Redis.
 pub struct PeriodicJob {
     pub(crate) name: String,
     pub(crate) class: String,
@@ -137,6 +148,7 @@ pub struct PeriodicJob {
 }
 
 impl PeriodicJob {
+    /// Deserialize a periodic job payload from Redis.
     pub fn from_periodic_job_string(periodic_job_str: String) -> Result<Self> {
         let mut pj: Self = serde_json::from_str(&periodic_job_str)?;
         pj.hydrate_attributes()?;
@@ -153,6 +165,7 @@ impl PeriodicJob {
         Ok(())
     }
 
+    /// Insert this periodic job into Redis.
     pub async fn insert(&self, conn: &mut RedisConnection) -> Result<bool> {
         let payload = serde_json::to_string(self)?;
         let inserted = self.update(conn, &payload).await?;
@@ -172,6 +185,7 @@ impl PeriodicJob {
         Ok(inserted)
     }
 
+    /// Update the next scheduled fire time in Redis.
     pub async fn update(&self, conn: &mut RedisConnection, periodic_job_str: &str) -> Result<bool> {
         if let Some(next_scheduled_time) = self.next_scheduled_time() {
             // [ZADD key CH score value] will return true/ false if the value added changed
@@ -194,6 +208,7 @@ impl PeriodicJob {
     }
 
     #[must_use]
+    /// Calculate the next scheduled execution time as a Unix timestamp.
     pub fn next_scheduled_time(&self) -> Option<f64> {
         if let Some(ref cron_sched) = self.cron_schedule {
             cron_sched
@@ -206,6 +221,7 @@ impl PeriodicJob {
     }
 
     #[must_use]
+    /// Convert the periodic job definition into a runnable [`Job`].
     pub fn into_job(&self) -> Job {
         let args = self.json_args.clone().expect("always set in contructor");
 

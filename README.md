@@ -172,6 +172,23 @@ The most commonly used entry points are:
 - `periodic::builder(...)` for cron-style recurring jobs.
 - `with_custom_namespace(...)` for compatibility with namespaced Redis deployments.
 
+## Rustdoc
+
+The public API now carries rustdoc comments in the source so `cargo doc` produces
+useful crate documentation.
+
+Generate the docs locally with:
+
+```bash
+cargo doc --no-deps
+```
+
+Then open `target/doc/sidekiq/index.html` in a browser, or use:
+
+```bash
+cargo doc --no-deps --open
+```
+
 #### Unique jobs
 
 Unique jobs are supported via the `unique_for` option which can be defined by default on the

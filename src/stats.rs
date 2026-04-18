@@ -5,12 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone)]
+/// Thread-safe counter used for tracking processor state.
 pub struct Counter {
     count: Arc<AtomicUsize>,
 }
 
 impl Counter {
     #[must_use]
+    /// Create a new counter with the provided initial value.
     pub fn new(n: usize) -> Self {
         Self {
             count: Arc::new(AtomicUsize::new(n)),
@@ -18,14 +20,17 @@ impl Counter {
     }
 
     #[must_use]
+    /// Read the current counter value.
     pub fn value(&self) -> usize {
         self.count.load(Ordering::SeqCst)
     }
 
+    /// Decrement the counter by `n`.
     pub fn decrby(&self, n: usize) {
         self.count.fetch_sub(n, Ordering::SeqCst);
     }
 
+    /// Increment the counter by `n`.
     pub fn incrby(&self, n: usize) {
         self.count.fetch_add(n, Ordering::SeqCst);
     }
@@ -52,6 +57,7 @@ struct ProcessInfo {
     labels: Vec<String>,
 }
 
+/// Publishes Sidekiq-compatible process statistics to Redis.
 pub struct StatsPublisher {
     hostname: String,
     identity: String,
@@ -72,6 +78,7 @@ fn generate_identity(hostname: &String) -> String {
 
 impl StatsPublisher {
     #[must_use]
+    /// Create a new stats publisher for a processor instance.
     pub fn new(
         hostname: String,
         queues: Vec<String>,
@@ -102,6 +109,7 @@ impl StatsPublisher {
     // "{\"hostname\":\"DESKTOP-UMSV21A\",\"started_at\":1658082501.5606177,\"pid\":107068,\"tag\":\"\",\"concurrency\":10,\"queues\":[\"ruby:v1_statistics\",\"ruby:v2_statistics\"],\"labels\":[],\"identity\":\"DESKTOP-UMSV21A:107068:5075431aeb06\"}"
     // 127.0.0.1:6379> hget "yolo_app:DESKTOP-UMSV21A:107068:5075431aeb06" irss
     // (nil)
+    /// Publish one heartbeat payload to Redis.
     pub async fn publish_stats(&self, redis: RedisPool) -> Result<(), Box<dyn std::error::Error>> {
         let stats = self.create_process_stats().await?;
         let mut conn = redis.get().await?;
